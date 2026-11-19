@@ -1,0 +1,13 @@
+# secrets
+.env
+
+# python
+.venv/
+__pycache__/
+*.pyc
+
+# unrelated research (diabetes digital twin), not part of this project
+reports/
+research_notes/
+
+.DS_Store
