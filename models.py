@@ -17,6 +17,11 @@ class OpportunityData(BaseModel):
     eligibility_requirements: str | None = Field(
         description="Age limits, citizenship, GPA, language scores, experience, etc."
     )
+    eligible_countries: list[str] = Field(
+        description="Countries/regions whose citizens or residents may apply, in English, only if the post "
+        "restricts this (e.g. ['EU'], ['Uzbekistan'], ['USA', 'Canada']); ['worldwide'] if explicitly "
+        "open to all countries; [] if not stated"
+    )
     education_level: list[EducationLevel] = Field(
         description="Levels that can apply; 'anyone' only if explicitly open to all; empty if not stated"
     )
@@ -33,3 +38,30 @@ class OpportunityData(BaseModel):
     )
     is_opportunity: bool = Field(description="False for news, updates, ads, or promos")
     original_language: Language = Field(description="Dominant language of the post")
+
+
+# ---------- Layer 2: matching ----------
+
+MatchAction = Literal["highly_relevant", "worth_a_look", "not_for_you", "apply_but_email_first"]
+
+
+class UserProfile(BaseModel):
+    location: str
+    age: int
+    education_level: str
+    fields_of_interest: list[str]
+    skills: list[str]
+    languages: list[str]
+    max_application_fee: float | None = None  # USD; None means no limit
+    no_fee_preferred: bool = False
+    goals: str
+
+
+class MatchResult(BaseModel):
+    opportunity_title: str
+    passed_hard_filters: bool
+    filter_failures: list[str] = []  # e.g. ["deadline_passed: expired 2026-01-15"]
+    relevance_score: int | None = Field(default=None, ge=0, le=100)  # only set if passed filters
+    match_explanation: str
+    education_flag: str | None = None  # eligibility concern, if any
+    action: MatchAction
