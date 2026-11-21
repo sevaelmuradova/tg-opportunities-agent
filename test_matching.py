@@ -1,5 +1,6 @@
 """Run: python test_matching.py  (cases that pass the hard filters call the real Gemini API)"""
 import asyncio
+from datetime import date
 
 from matcher import match_opportunity
 from models import MatchResult, OpportunityData
@@ -12,6 +13,7 @@ def make_opp(**overrides) -> OpportunityData:
         title="Test Opportunity",
         type="program",
         deadline_raw="March 1, 2027",
+        deadline_parsed=date(2027, 3, 1),
         eligibility_requirements=None,
         eligible_countries=[],
         education_level=[],
@@ -32,6 +34,7 @@ PERFECT_MATCH = make_opp(
     title="Global ML Research Internship 2027",
     type="internship",
     deadline_raw="February 15, 2027",
+    deadline_parsed=date(2027, 2, 15),
     eligibility_requirements="Open to students and recent school graduates from any country, ages 18+. "
     "Strong Python and PyTorch skills; experience with LLMs or speech models is a plus.",
     eligible_countries=["worldwide"],
@@ -46,6 +49,7 @@ PERFECT_MATCH = make_opp(
 DEADLINE_PASSED = make_opp(
     title="AI Summer School 2026",
     deadline_raw="January 15, 2026",
+    deadline_parsed=date(2026, 1, 15),
     eligible_fields=["AI"],
 )
 
@@ -61,6 +65,7 @@ AMBIGUOUS_EDUCATION = make_opp(
     title="NLP Summer Research Program",
     type="research",
     deadline_raw="2027-yil 28-fevralgacha",
+    deadline_parsed=date(2027, 2, 28),
     eligibility_requirements="Open to undergraduate students interested in NLP. Basic Python required.",
     eligible_countries=["worldwide"],
     education_level=["undergraduate"],

@@ -4,7 +4,7 @@ Stage 1 - hard_filter(): pure Python, no LLM. Rejects only on clear-cut facts.
 Stage 2 - llm_score(): Gemini scores relevance for opportunities that survive Stage 1.
 
 Everything in Stage 1 is deliberately conservative: when a value can't be parsed with
-confidence (e.g. a deadline without a year, an unknown currency, an unfamiliar region),
+confidence (e.g. no deadline_parsed, an unknown currency, an unfamiliar region),
 the opportunity passes and Stage 2 judges it.
 """
 import re
@@ -21,62 +21,6 @@ from models import MatchAction, MatchResult, OpportunityData, UserProfile
 def _normalize(text: str) -> str:
     """Lowercase and unify the many apostrophe variants used in Uzbek Latin (o‘, oʻ, o’ -> o')."""
     return re.sub(r"[‘’ʻʼ`]", "'", text.lower())
-
-
-# ---------------------------------------------------------------- deadline parsing
-
-# Month name prefixes: English, Uzbek Latin, Russian / Uzbek Cyrillic.
-_MONTH_PREFIXES = [
-    ("jan", 1), ("yan", 1), ("янв", 1),
-    ("feb", 2), ("fev", 2), ("фев", 2),
-    ("mar", 3), ("мар", 3),
-    ("apr", 4), ("апр", 4),
-    ("may", 5), ("май", 5), ("мая", 5),
-    ("jun", 6), ("iyun", 6), ("июн", 6),
-    ("jul", 7), ("iyul", 7), ("июл", 7),
-    ("aug", 8), ("avg", 8), ("авг", 8),
-    ("sep", 9), ("sen", 9), ("сен", 9),
-    ("oct", 10), ("okt", 10), ("окт", 10),
-    ("nov", 11), ("noy", 11), ("ноя", 11),
-    ("dec", 12), ("dek", 12), ("дек", 12),
-]
-
-
-def _safe_date(year: int, month: int, day: int) -> date | None:
-    try:
-        return date(year, month, day)
-    except ValueError:
-        return None
-
-
-def parse_deadline(raw: str | None) -> date | None:
-    """Parse deadline_raw into a date. Returns None unless day, month AND year are all present.
-
-    Handles: 2027-01-10 · 10.01.2027 · January 10, 2027 · 20 января 2027 · 2027-yil 28-fevralgacha.
-    "3-yanvar" (no year) -> None: we can't know which January, so we don't reject on it.
-    """
-    if not raw:
-        return None
-    text = _normalize(raw)
-
-    if m := re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", text):  # ISO
-        return _safe_date(int(m[1]), int(m[2]), int(m[3]))
-
-    if m := re.search(r"\b(\d{1,2})[./](\d{1,2})[./](\d{4})\b", text):  # 10.01.2027 / 01/15/2027
-        a, b, year = int(m[1]), int(m[2]), int(m[3])
-        day, month = (b, a) if b > 12 else (a, b)  # dd.mm by default; mm/dd only when unambiguous
-        return _safe_date(year, month, day)
-
-    year_m = re.search(r"\b(20\d{2})", text)
-    day_m = re.search(r"(?<![\d:])(\d{1,2})(?![\d:])", text)  # skips times like 23:59
-    month = next(
-        (num for word in re.findall(r"[a-zа-яёўқғҳ]+", text)
-         for prefix, num in _MONTH_PREFIXES if word.startswith(prefix)),
-        None,
-    )
-    if year_m and day_m and month:
-        return _safe_date(int(year_m[1]), month, int(day_m[1]))
-    return None
 
 
 # ---------------------------------------------------------------- fee parsing
@@ -185,9 +129,9 @@ def hard_filter(opp: OpportunityData, profile: UserProfile, today: date | None =
     if not opp.is_opportunity:
         failures.append(f"is_not_opportunity: post type is '{opp.type}'")
 
-    deadline = parse_deadline(opp.deadline_raw)
-    if deadline and deadline < today:
-        failures.append(f"deadline_passed: expired {deadline.isoformat()}")
+    # deadline_parsed is resolved by the LLM in Layer 1; None (rolling/unknown) passes to Stage 2.
+    if opp.deadline_parsed is not None and opp.deadline_parsed < today:
+        failures.append(f"deadline_passed: expired {opp.deadline_parsed.isoformat()}")
 
     if country_excluded(opp):
         failures.append(f"country_excluded: only for {', '.join(opp.eligible_countries)}")

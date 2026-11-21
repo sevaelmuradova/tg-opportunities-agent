@@ -11,3 +11,6 @@ reports/
 research_notes/
 
 .DS_Store
+
+# local database
+*.db
