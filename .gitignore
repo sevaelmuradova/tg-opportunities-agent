@@ -14,3 +14,7 @@ research_notes/
 
 # local database
 *.db
+
+# Telethon login session = full access to your Telegram account. Never commit.
+*.session
+*.session-journal

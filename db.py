@@ -5,6 +5,7 @@ It is read on every connection, so tests can point it at a temp file.
 List fields are stored as JSON arrays in TEXT columns; dates as ISO 'YYYY-MM-DD' text.
 """
 import json
+import re
 import os
 from contextlib import asynccontextmanager
 from datetime import date, timedelta
@@ -76,6 +77,14 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     profile_data TEXT,  -- full UserProfile as JSON
     created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS monitored_channels (
+    id               INTEGER PRIMARY KEY,
+    user_id          TEXT,
+    channel_username TEXT COLLATE NOCASE,  -- Telegram usernames are case-insensitive
+    added_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (user_id, channel_username)
 );
 """
 
@@ -250,3 +259,125 @@ async def get_user_profile(user_id: str) -> UserProfile | None:
         async with db.execute("SELECT profile_data FROM user_profiles WHERE user_id = ?", (user_id,)) as cur:
             row = await cur.fetchone()
     return UserProfile.model_validate_json(row["profile_data"]) if row else None
+
+
+# ---------------------------------------------------------------- Layer 4: agent search
+
+SEARCH_SQL = """
+WITH latest_match AS (       -- the user's most recent score for each opportunity
+    SELECT m.* FROM match_results m
+    WHERE m.user_id = :user_id
+      AND m.id = (SELECT MAX(id) FROM match_results
+                  WHERE opportunity_id = m.opportunity_id AND user_id = :user_id)
+),
+latest_action AS (           -- the user's most recent action (saved/dismissed/...) on each
+    SELECT a.opportunity_id, a.action FROM user_actions a
+    WHERE a.user_id = :user_id
+      AND a.id = (SELECT MAX(id) FROM user_actions
+                  WHERE opportunity_id = a.opportunity_id AND user_id = :user_id)
+)
+SELECT o.id, o.title, o.type, o.deadline_raw, o.deadline_parsed, o.country, o.apply_url,
+       o.application_fee, o.summary, o.eligible_fields,
+       lm.relevance_score, lm.education_flag, la.action AS user_action
+FROM opportunities o
+JOIN latest_match lm ON lm.opportunity_id = o.id
+LEFT JOIN latest_action la ON la.opportunity_id = o.id
+WHERE lm.relevance_score >= :min_score          -- NULL (failed hard filters) never matches
+  AND (la.action IS NULL OR la.action != 'dismissed')
+  AND (:type IS NULL OR o.type = :type)
+  AND ({keyword_clause})
+ORDER BY lm.relevance_score DESC, o.deadline_parsed
+LIMIT :limit
+"""
+SEARCH_COLUMNS = ("o.title", "o.summary", "o.type", "o.eligible_fields", "o.benefits", "o.eligibility_requirements")
+
+
+def _search_terms(query: str) -> list[str]:
+    """Split into keywords; crude plural strip so 'internships' matches 'internship'."""
+    terms = []
+    for word in re.findall(r"\w+", query.lower()):
+        if len(word) > 3 and word.endswith("s"):
+            word = word[:-1]
+        terms.append(word.replace("%", "").replace("_", ""))
+    return [t for t in terms if t]
+
+
+async def search_opportunities(
+    user_id: str, query: str, type: str | None = None, min_score: int = 50, limit: int = 5
+) -> list[dict]:
+    """Opportunities matching ANY keyword (case-insensitive) in title/summary/fields/etc.,
+    scored >= min_score for this user, not dismissed, best score first. Empty query = no keyword filter."""
+    params: dict = {"user_id": user_id, "type": type, "min_score": min_score, "limit": limit}
+    clauses = []
+    for i, term in enumerate(_search_terms(query)):
+        params[f"t{i}"] = f"%{term}%"
+        clauses.append("(" + " OR ".join(f"{col} LIKE :t{i}" for col in SEARCH_COLUMNS) + ")")
+    sql = SEARCH_SQL.format(keyword_clause=" OR ".join(clauses) or "1 = 1")
+    async with _connect() as db:
+        async with db.execute(sql, params) as cur:
+            return [_row_to_dict(row) for row in await cur.fetchall()]
+
+
+# ---------------------------------------------------------------- Layer 5: monitored channels
+# channel_username is stored with a leading "@", e.g. "@EduGrandsUz"; comparisons ignore case.
+
+
+async def add_channel(user_id: str, channel_username: str) -> bool:
+    """Returns True if added, False if the user already monitors it."""
+    async with _connect() as db:
+        cur = await db.execute(
+            "INSERT INTO monitored_channels (user_id, channel_username) VALUES (?, ?) ON CONFLICT DO NOTHING",
+            (user_id, channel_username),
+        )
+        await db.commit()
+        return cur.rowcount == 1
+
+
+async def remove_channel(user_id: str, channel_username: str) -> bool:
+    """Returns True if removed, False if it wasn't monitored."""
+    async with _connect() as db:
+        cur = await db.execute(
+            "DELETE FROM monitored_channels WHERE user_id = ? AND channel_username = ?",
+            (user_id, channel_username),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def get_user_channels(user_id: str) -> list[str]:
+    async with _connect() as db:
+        async with db.execute(
+            "SELECT channel_username FROM monitored_channels WHERE user_id = ? ORDER BY added_at, id",
+            (user_id,),
+        ) as cur:
+            return [row["channel_username"] for row in await cur.fetchall()]
+
+
+async def get_all_monitored_channels() -> list[str]:
+    """Unique channels across all users (what the Telethon monitor listens to)."""
+    async with _connect() as db:
+        async with db.execute(
+            "SELECT MIN(channel_username) AS channel_username FROM monitored_channels "
+            "GROUP BY channel_username ORDER BY channel_username"
+        ) as cur:
+            return [row["channel_username"] for row in await cur.fetchall()]
+
+
+async def get_channel_subscribers(channel_username: str) -> list[str]:
+    """user_ids monitoring this channel (a new post is processed once per subscriber)."""
+    async with _connect() as db:
+        async with db.execute(
+            "SELECT user_id FROM monitored_channels WHERE channel_username = ? ORDER BY id",
+            (channel_username,),
+        ) as cur:
+            return [row["user_id"] for row in await cur.fetchall()]
+
+
+async def count_match_results(opportunity_id: int, user_id: str) -> int:
+    """How many times this opportunity was scored for the user (>1 = seen before, e.g. a repost)."""
+    async with _connect() as db:
+        async with db.execute(
+            "SELECT COUNT(*) AS n FROM match_results WHERE opportunity_id = ? AND user_id = ?",
+            (opportunity_id, user_id),
+        ) as cur:
+            return (await cur.fetchone())["n"]
